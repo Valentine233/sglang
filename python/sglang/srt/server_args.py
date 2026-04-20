@@ -2264,58 +2264,58 @@ class ServerArgs:
                 not self.enable_mamba_extra_buffer()
             ), f"mamba extra_buffer is not supported for {model_arch} model"
 
-        if self.enable_mamba_extra_buffer():  # extra_buffer
-            if self.disable_radix_cache:
-                raise ValueError(
-                    "mamba extra_buffer is not compatible with --disable-radix-cache "
-                    "Overlap scheduling is already supported with no_buffer + disable_radix_cache. "
-                    "Please use --mamba-scheduler-strategy no_buffer instead."
-                )
+        # if self.enable_mamba_extra_buffer():  # extra_buffer
+        #     if self.disable_radix_cache:
+        #         raise ValueError(
+        #             "mamba extra_buffer is not compatible with --disable-radix-cache "
+        #             "Overlap scheduling is already supported with no_buffer + disable_radix_cache. "
+        #             "Please use --mamba-scheduler-strategy no_buffer instead."
+        #         )
 
-            assert (
-                is_cuda()
-            ), "Mamba extra_buffer is only supported on CUDA devices with FLA backend"
-            if self.speculative_num_draft_tokens is not None:
-                assert (
-                    self.mamba_track_interval >= self.speculative_num_draft_tokens
-                ), f"mamba_track_interval {self.mamba_track_interval} must be greater than or equal to speculative_num_draft_tokens {self.speculative_num_draft_tokens}"
+        #     assert (
+        #         is_cuda()
+        #     ), "Mamba extra_buffer is only supported on CUDA devices with FLA backend"
+        #     if self.speculative_num_draft_tokens is not None:
+        #         assert (
+        #             self.mamba_track_interval >= self.speculative_num_draft_tokens
+        #         ), f"mamba_track_interval {self.mamba_track_interval} must be greater than or equal to speculative_num_draft_tokens {self.speculative_num_draft_tokens}"
 
-            if self.page_size is not None:
-                assert (
-                    self.mamba_track_interval % self.page_size == 0
-                ), f"mamba_track_interval {self.mamba_track_interval} must be divisible by page_size {self.page_size}"
-                assert (
-                    max(FLA_CHUNK_SIZE, self.page_size)
-                    % min(FLA_CHUNK_SIZE, self.page_size)
-                    == 0
-                ), f"For SSM models with extra buffer, either FLA_CHUNK_SIZE or page_size must be divisible by the other, got {FLA_CHUNK_SIZE=}, {self.page_size=}"
-        elif not self.disable_radix_cache:  # no_buffer
-            if self.page_size is not None and self.page_size != 1:
-                logger.warning(
-                    f"{model_arch} with radix cache requires page_size=1 in the current "
-                    f"Mamba scheduling mode (no_buffer), but got {self.page_size}. "
-                    "Automatically setting page_size=1."
-                )
-                self.page_size = 1
-            if self.speculative_algorithm is None:
-                logger.warning(
-                    "Disabling overlap schedule since mamba no_buffer is not compatible with "
-                    "overlap schedule, try to use --disable-radix-cache if overlap schedule is necessary"
-                )
-                self.disable_overlap_schedule = True
-                if self.attention_backend == "trtllm_mha":
-                    logger.warning(
-                        "Disabling radix cache since trtllm_mha does not support page_size = 1, which is required by MambaRadixCache. "
-                        "Try to use --attention-backend triton if radix cache is necessary."
-                    )
-                    self.disable_radix_cache = True
-                    self.disable_overlap_schedule = False
-            else:
-                if not self.disable_radix_cache:
-                    raise ValueError(
-                        f"Speculative decoding for {model_arch} is not compatible with radix cache when using --mamba-scheduler-strategy no_buffer."
-                        "To use radix cache with speculative decoding, please use --mamba-scheduler-strategy extra_buffer and set SGLANG_ENABLE_SPEC_V2=1."
-                    )
+        #     if self.page_size is not None:
+        #         assert (
+        #             self.mamba_track_interval % self.page_size == 0
+        #         ), f"mamba_track_interval {self.mamba_track_interval} must be divisible by page_size {self.page_size}"
+        #         assert (
+        #             max(FLA_CHUNK_SIZE, self.page_size)
+        #             % min(FLA_CHUNK_SIZE, self.page_size)
+        #             == 0
+        #         ), f"For SSM models with extra buffer, either FLA_CHUNK_SIZE or page_size must be divisible by the other, got {FLA_CHUNK_SIZE=}, {self.page_size=}"
+        # elif not self.disable_radix_cache:  # no_buffer
+        #     if self.page_size is not None and self.page_size != 1:
+        #         logger.warning(
+        #             f"{model_arch} with radix cache requires page_size=1 in the current "
+        #             f"Mamba scheduling mode (no_buffer), but got {self.page_size}. "
+        #             "Automatically setting page_size=1."
+        #         )
+        #         self.page_size = 1
+        #     if self.speculative_algorithm is None:
+        #         logger.warning(
+        #             "Disabling overlap schedule since mamba no_buffer is not compatible with "
+        #             "overlap schedule, try to use --disable-radix-cache if overlap schedule is necessary"
+        #         )
+        #         self.disable_overlap_schedule = True
+        #         if self.attention_backend == "trtllm_mha":
+        #             logger.warning(
+        #                 "Disabling radix cache since trtllm_mha does not support page_size = 1, which is required by MambaRadixCache. "
+        #                 "Try to use --attention-backend triton if radix cache is necessary."
+        #             )
+        #             self.disable_radix_cache = True
+        #             self.disable_overlap_schedule = False
+        #     else:
+        #         if not self.disable_radix_cache:
+        #             raise ValueError(
+        #                 f"Speculative decoding for {model_arch} is not compatible with radix cache when using --mamba-scheduler-strategy no_buffer."
+        #                 "To use radix cache with speculative decoding, please use --mamba-scheduler-strategy extra_buffer and set SGLANG_ENABLE_SPEC_V2=1."
+        #             )
 
     def _handle_sampling_backend(self):
         if self.sampling_backend is None:

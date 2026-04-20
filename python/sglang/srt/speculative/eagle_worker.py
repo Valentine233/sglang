@@ -64,6 +64,7 @@ from sglang.srt.utils import (
     MultiprocessingSerializer,
     empty_context,
     get_available_gpu_memory,
+    is_cpu,
     is_cuda,
     is_npu,
     next_power_of_2,
@@ -75,6 +76,9 @@ _is_npu = is_npu()
 if is_cuda():
     from sgl_kernel import segment_packbits  # noqa: F401
 
+if is_cpu():
+    assign_draft_cache_locs = torch.ops.sgl_kernel.assign_draft_cache_locs_cpu
+    
 logger = logging.getLogger(__name__)
 
 
@@ -205,7 +209,8 @@ class EAGLEWorker(TpModelWorker):
             self.draft_model_runner.tp_group
         ), speculative_moe_backend_context(), speculative_moe_a2a_backend_context():
             self.init_attention_backend()
-            self.init_cuda_graphs()
+            if is_cuda():
+                self.init_cuda_graphs()
 
         # Some dummy tensors
         self.num_new_pages_per_topk = torch.empty(
@@ -512,24 +517,44 @@ class EAGLEWorker(TpModelWorker):
             duplicate_cache_len = 0
             source_cache_loc, target_cache_loc, last_page_lens_cumsum = None, None, None
 
-        assign_draft_cache_locs[(num_seqs,)](
-            batch.req_pool_indices,
-            batch.req_to_token_pool.req_to_token,
-            batch.seq_lens,
-            self.extend_lens,
-            self.num_new_pages_per_topk,
-            out_cache_loc,
-            source_cache_loc,
-            target_cache_loc,
-            last_page_lens_cumsum,
-            duplicate_cache_len,
-            batch.req_to_token_pool.req_to_token.shape[1],
-            self.topk,
-            self.speculative_num_steps,
-            self.page_size,
-            next_power_of_2(num_seqs),
-            next_power_of_2(self.speculative_num_steps + self.page_size),
-        )
+        if is_cpu():
+            assign_draft_cache_locs(
+                batch.req_pool_indices,
+                batch.req_to_token_pool.req_to_token,
+                batch.seq_lens,
+                self.extend_lens,
+                self.num_new_pages_per_topk,
+                out_cache_loc,
+                source_cache_loc,
+                target_cache_loc,
+                last_page_lens_cumsum,
+                duplicate_cache_len,
+                batch.req_to_token_pool.req_to_token.shape[1],
+                self.topk,
+                self.speculative_num_steps,
+                self.page_size,
+                next_power_of_2(num_seqs),
+                next_power_of_2(self.speculative_num_steps + self.page_size),
+            )
+        else:
+            assign_draft_cache_locs[(num_seqs,)](
+                batch.req_pool_indices,
+                batch.req_to_token_pool.req_to_token,
+                batch.seq_lens,
+                self.extend_lens,
+                self.num_new_pages_per_topk,
+                out_cache_loc,
+                source_cache_loc,
+                target_cache_loc,
+                last_page_lens_cumsum,
+                duplicate_cache_len,
+                batch.req_to_token_pool.req_to_token.shape[1],
+                self.topk,
+                self.speculative_num_steps,
+                self.page_size,
+                next_power_of_2(num_seqs),
+                next_power_of_2(self.speculative_num_steps + self.page_size),
+            )
 
         if self.page_size > 1 and self.topk > 1:
             if duplicate_cache_len > 0:

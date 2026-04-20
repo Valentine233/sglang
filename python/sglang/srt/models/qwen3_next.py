@@ -170,8 +170,25 @@ class Qwen3GatedDeltaNet(nn.Module):
 
         set_weight_attrs(self.A_log, {"weight_loader": sharded_weight_loader(0)})
         set_weight_attrs(self.dt_bias, {"weight_loader": sharded_weight_loader(0)})
-        self.norm = (
-            RMSNormGated(
+        # self.norm = (
+        #     RMSNormGated(
+        #         self.head_v_dim,
+        #         eps=self.layer_norm_epsilon,
+        #         group_size=None,
+        #         norm_before_gate=True,
+        #         device=torch.get_device_module().current_device(),
+        #         dtype=config.torch_dtype,
+        #     )
+        #     if not get_global_server_args().disable_piecewise_cuda_graph
+        #     else FusedRMSNormGated(
+        #         self.head_v_dim,
+        #         eps=self.layer_norm_epsilon,
+        #         activation=self.activation,
+        #         device=torch.get_device_module().current_device(),
+        #         dtype=config.torch_dtype,
+        #     )
+        # )
+        self.norm = RMSNormGated(
                 self.head_v_dim,
                 eps=self.layer_norm_epsilon,
                 group_size=None,
@@ -179,15 +196,6 @@ class Qwen3GatedDeltaNet(nn.Module):
                 device=torch.get_device_module().current_device(),
                 dtype=config.torch_dtype,
             )
-            if not get_global_server_args().disable_piecewise_cuda_graph
-            else FusedRMSNormGated(
-                self.head_v_dim,
-                eps=self.layer_norm_epsilon,
-                activation=self.activation,
-                device=torch.get_device_module().current_device(),
-                dtype=config.torch_dtype,
-            )
-        )
 
         self.out_proj = RowParallelLinear(
             self.value_dim,
@@ -960,8 +968,9 @@ class Qwen3NextForCausalLM(nn.Module):
         del self.lm_head.weight
         self.model.embed_tokens.weight = embed
         self.lm_head.weight = head
-        torch.cuda.empty_cache()
-        torch.cuda.synchronize()
+        if _is_cuda:
+            torch.cuda.empty_cache()
+            torch.cuda.synchronize()
 
     def get_embed(self):
         return self.model.embed_tokens.weight
@@ -975,8 +984,9 @@ class Qwen3NextForCausalLM(nn.Module):
             return
         del self.model.embed_tokens.weight
         self.model.embed_tokens.weight = embed
-        torch.cuda.empty_cache()
-        torch.cuda.synchronize()
+        if _is_cuda:
+            torch.cuda.empty_cache()
+            torch.cuda.synchronize()
 
     def load_weights(
         self, weights: Iterable[Tuple[str, torch.Tensor]], is_mtp: bool = False
