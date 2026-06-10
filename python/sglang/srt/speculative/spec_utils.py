@@ -14,44 +14,29 @@ from sglang.srt.distributed.parallel_state import (
     patch_tensor_parallel_group,
 )
 from sglang.srt.environ import envs
-from sglang.srt.mem_cache.common import get_last_loc
-from sglang.srt.server_args import ServerArgs, get_global_server_args
+from sglang.srt.server_args import get_global_server_args
+from sglang.srt.speculative.triton_ops.cache_locs import (
+    align_evict_mask_to_page_size as align_evict_mask_to_page_size,
+)
+from sglang.srt.speculative.triton_ops.cache_locs import (
+    assign_req_to_token_pool as assign_req_to_token_pool,
+)
+from sglang.srt.speculative.triton_ops.cache_locs import (
+    create_extend_after_decode_spec_info as create_extend_after_decode_spec_info,
+)
+from sglang.srt.speculative.triton_ops.cache_locs import (
+    filter_finished_cache_loc_kernel as filter_finished_cache_loc_kernel,
+)
+from sglang.srt.speculative.triton_ops.cache_locs import (
+    generate_draft_decode_kv_indices as generate_draft_decode_kv_indices,
+)
+from sglang.srt.speculative.triton_ops.cache_locs import (
+    get_src_tgt_cache_loc as get_src_tgt_cache_loc,
+)
+from sglang.srt.speculative.triton_ops.cache_locs import (
+    get_target_cache_loc as get_target_cache_loc,
+)
 from sglang.srt.utils import is_cpu, is_cuda, is_hip, is_musa, is_npu, next_power_of_2
-
-if not is_cpu():
-    from sglang.srt.speculative.triton_ops.cache_locs import (
-        align_evict_mask_to_page_size as align_evict_mask_to_page_size,
-    )
-    from sglang.srt.speculative.triton_ops.cache_locs import (
-        assign_req_to_token_pool as assign_req_to_token_pool,
-    )
-    from sglang.srt.speculative.triton_ops.cache_locs import (
-        assign_req_to_token_pool_func as assign_req_to_token_pool_func,
-    )
-    from sglang.srt.speculative.triton_ops.cache_locs import (
-        create_extend_after_decode_spec_info as create_extend_after_decode_spec_info,
-    )
-    from sglang.srt.speculative.triton_ops.cache_locs import (
-        filter_finished_cache_loc_kernel as filter_finished_cache_loc_kernel,
-    )
-    from sglang.srt.speculative.triton_ops.cache_locs import (
-        generate_draft_decode_kv_indices as generate_draft_decode_kv_indices,
-    )
-    from sglang.srt.speculative.triton_ops.cache_locs import (
-        get_src_tgt_cache_loc as get_src_tgt_cache_loc,
-    )
-    from sglang.srt.speculative.triton_ops.cache_locs import (
-        get_target_cache_loc as get_target_cache_loc,
-    )
-else:
-    align_evict_mask_to_page_size = None
-    assign_draft_cache_locs = None
-    assign_req_to_token_pool = None
-    create_extend_after_decode_spec_info = None
-    filter_finished_cache_loc_kernel = None
-    generate_draft_decode_kv_indices = None
-    get_src_tgt_cache_loc = None
-    get_target_cache_loc = None
 
 _is_cuda = is_cuda()
 _is_hip = is_hip()

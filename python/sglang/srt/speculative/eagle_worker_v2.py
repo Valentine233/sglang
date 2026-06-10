@@ -52,7 +52,6 @@ from sglang.srt.speculative.eagle_draft_extend_cuda_graph_runner import (
 )
 from sglang.srt.speculative.eagle_info import EagleDraftInput, EagleVerifyInput
 from sglang.srt.speculative.eagle_info_v2 import (
-    assign_extend_cache_locs_func,
     fill_accept_out_cache_loc_func,
     fill_new_verified_id_func,
 )
@@ -1283,12 +1282,6 @@ class EAGLEWorkerV2(BaseSpecWorker):
             or self.target_worker.model_runner.hybrid_lightning_config is not None
         ):
             self._mamba_verify_update(batch, accept_lens, accept_index, bs)
-
-        if _is_cpu:
-            verify_done = None
-        else:
-            verify_done = torch.get_device_module(self.device).Event()
-            verify_done.record()
 
         if not batch.forward_mode.is_idle():
             accept_tokens = predict[accept_index]
