@@ -36,23 +36,35 @@ from sglang.srt.speculative.spec_utils import (
     SIMULATE_ACC_LEN,
     generate_simulated_accept_index,
 )
-from sglang.srt.speculative.triton_ops.cache_locs import (
-    assign_draft_cache_locs_contiguous as assign_draft_cache_locs_contiguous,
+from sglang.srt.utils.common import (
+    is_cpu,
+    is_cuda,
+    is_hip,
+    is_musa,
+    is_npu,
+    next_power_of_2,
 )
-from sglang.srt.speculative.triton_ops.cache_locs import (
-    assign_extend_cache_locs as assign_extend_cache_locs,
-)
-from sglang.srt.speculative.triton_ops.cache_locs import (
-    assign_extend_cache_locs_func as assign_extend_cache_locs_func,
-)
-from sglang.srt.speculative.triton_ops.eagle import (
-    fill_accept_out_cache_loc as fill_accept_out_cache_loc,
-)
-from sglang.srt.speculative.triton_ops.eagle import (
-    fill_bonus_tokens as fill_bonus_tokens,
-)
+
+_is_cpu = is_cpu()
+
+if not _is_cpu:
+    from sglang.srt.speculative.triton_ops.cache_locs import (
+        assign_draft_cache_locs_contiguous as assign_draft_cache_locs_contiguous,
+    )
+    from sglang.srt.speculative.triton_ops.cache_locs import (
+        assign_extend_cache_locs as assign_extend_cache_locs,
+    )
+    from sglang.srt.speculative.triton_ops.cache_locs import (
+        assign_extend_cache_locs_func as assign_extend_cache_locs_func,
+    )
+    from sglang.srt.speculative.triton_ops.eagle import (
+        fill_accept_out_cache_loc as _fill_accept_out_cache_loc_triton,
+    )
+    from sglang.srt.speculative.triton_ops.eagle import (
+        fill_bonus_tokens as _fill_bonus_tokens_triton,
+    )
+
 from sglang.srt.utils.async_probe import maybe_detect_nan, maybe_detect_oob
-from sglang.srt.utils.common import is_cuda, is_hip, is_musa, is_npu
 
 _is_cuda = is_cuda()
 _is_hip = is_hip()
@@ -71,6 +83,14 @@ if is_cuda() or is_musa():
         top_k_renorm_prob,
         top_p_renorm_prob,
         tree_speculative_sampling_target_only,
+    )
+
+if _is_cpu:
+    from sgl_kernel import (
+        assign_draft_cache_locs_page_size_1_cpu,
+        assign_extend_cache_locs_cpu,
+        fill_accepted_out_cache_loc_cpu,
+        fill_new_verified_id_cpu,
     )
 
 
@@ -119,6 +139,75 @@ def duplicate_prefix_tail_to_draft_branches(
     )[vmask]
     if src_slots.numel() > 0:
         token_to_kv_pool.move_kv_cache(tgt_slots, src_slots)
+
+
+def fill_new_verified_id_func(
+    verified_id, accept_lens, new_verified_id, accept_stride, bs
+):
+    if _is_cpu:
+        fill_new_verified_id_cpu(
+            verified_id, accept_lens, new_verified_id, accept_stride
+        )
+    else:
+        _fill_bonus_tokens_triton[(bs,)](
+            verified_id, accept_lens, new_verified_id, accept_stride
+        )
+
+
+def fill_accept_out_cache_loc_func(
+    accept_index, out_cache_loc, accept_out_cache_loc, size
+):
+    if _is_cpu:
+        fill_accepted_out_cache_loc_cpu(
+            accept_index, out_cache_loc, accept_out_cache_loc, size
+        )
+    else:
+        _fill_accept_out_cache_loc_triton[(size,)](
+            accept_index, out_cache_loc, accept_out_cache_loc, next_power_of_2(size)
+        )
+
+
+def assign_extend_cache_locs_func(
+    req_pool_indices: torch.Tensor,
+    req_to_token: torch.Tensor,
+    start_offset: torch.Tensor,
+    end_offset: torch.Tensor,
+    batch_size: int,
+    draft_token_num: int,
+    device,
+) -> torch.Tensor:
+    if _is_cuda or _is_hip or _is_musa:
+        out_cache_loc = torch.empty(
+            (batch_size * draft_token_num,),
+            dtype=torch.int64,
+            device=device,
+        )
+        assign_extend_cache_locs[(batch_size,)](
+            req_pool_indices,
+            req_to_token,
+            start_offset,
+            end_offset,
+            out_cache_loc,
+            req_to_token.shape[1],
+            next_power_of_2(batch_size),
+        )
+        return out_cache_loc
+
+    elif _is_cpu:
+        out_cache_loc = torch.empty(
+            (batch_size * draft_token_num,),
+            dtype=torch.int64,
+            device=device,
+        )
+        assign_extend_cache_locs_cpu(
+            req_pool_indices,
+            req_to_token,
+            start_offset,
+            end_offset,
+            out_cache_loc,
+            req_to_token.shape[1],
+        )
+        return out_cache_loc
 
 
 @dataclass
@@ -241,15 +330,26 @@ class EagleDraftInputV2Mixin:
                     device=batch.device,
                 )
                 # FIXME(lsyin): align with the default code path
-                assign_draft_cache_locs_contiguous[(bs,)](
-                    batch.req_pool_indices,
-                    req_to_token_pool.req_to_token,
-                    batch.seq_lens,
-                    batch.out_cache_loc,
-                    req_to_token_pool.req_to_token.shape[1],
-                    topk,
-                    num_steps,
-                )
+                if _is_cpu:
+                    assign_draft_cache_locs_page_size_1_cpu(
+                        batch.req_pool_indices,
+                        req_to_token_pool.req_to_token,
+                        batch.seq_lens,
+                        batch.out_cache_loc,
+                        req_to_token_pool.req_to_token.shape[1],
+                        topk,
+                        num_steps,
+                    )
+                else:
+                    assign_draft_cache_locs_contiguous[(bs,)](
+                        batch.req_pool_indices,
+                        req_to_token_pool.req_to_token,
+                        batch.seq_lens,
+                        batch.out_cache_loc,
+                        req_to_token_pool.req_to_token.shape[1],
+                        topk,
+                        num_steps,
+                    )
             else:
                 # page_size > 1 + topk > 1: per-branch page-aligned draft pages.
                 # Reduce out_cache_loc from the page-aligned tree region down to the
@@ -501,7 +601,7 @@ class EagleVerifyInputV2Mixin:
         num_correct_drafts = torch.empty((bs,), dtype=torch.int32, device=device)
 
         # Sample tokens
-        if sampling_info.is_all_greedy or _is_npu or _is_hip:
+        if sampling_info.is_all_greedy or _is_cpu or _is_npu or _is_hip:
             target_predict = torch.argmax(next_token_logits, dim=-1)
             target_predict = target_predict.reshape(bs, self.draft_token_num)
             predict, accept_index, num_correct_drafts = verify_tree_greedy_func(

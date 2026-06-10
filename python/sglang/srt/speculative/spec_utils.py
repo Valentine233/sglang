@@ -14,37 +14,50 @@ from sglang.srt.distributed.parallel_state import (
     patch_tensor_parallel_group,
 )
 from sglang.srt.environ import envs
-from sglang.srt.server_args import get_global_server_args
-from sglang.srt.speculative.triton_ops.cache_locs import (
-    align_evict_mask_to_page_size as align_evict_mask_to_page_size,
-)
-from sglang.srt.speculative.triton_ops.cache_locs import (
-    assign_req_to_token_pool as assign_req_to_token_pool,
-)
-from sglang.srt.speculative.triton_ops.cache_locs import (
-    assign_req_to_token_pool_func as assign_req_to_token_pool_func,
-)
-from sglang.srt.speculative.triton_ops.cache_locs import (
-    create_extend_after_decode_spec_info as create_extend_after_decode_spec_info,
-)
-from sglang.srt.speculative.triton_ops.cache_locs import (
-    filter_finished_cache_loc_kernel as filter_finished_cache_loc_kernel,
-)
-from sglang.srt.speculative.triton_ops.cache_locs import (
-    generate_draft_decode_kv_indices as generate_draft_decode_kv_indices,
-)
-from sglang.srt.speculative.triton_ops.cache_locs import (
-    get_src_tgt_cache_loc as get_src_tgt_cache_loc,
-)
-from sglang.srt.speculative.triton_ops.cache_locs import (
-    get_target_cache_loc as get_target_cache_loc,
-)
-from sglang.srt.utils import is_cuda, is_hip, is_musa, is_npu
+from sglang.srt.mem_cache.common import get_last_loc
+from sglang.srt.server_args import ServerArgs, get_global_server_args
+from sglang.srt.utils import is_cpu, is_cuda, is_hip, is_musa, is_npu, next_power_of_2
+
+if not is_cpu():
+    from sglang.srt.speculative.triton_ops.cache_locs import (
+        align_evict_mask_to_page_size as align_evict_mask_to_page_size,
+    )
+    from sglang.srt.speculative.triton_ops.cache_locs import (
+        assign_req_to_token_pool as assign_req_to_token_pool,
+    )
+    from sglang.srt.speculative.triton_ops.cache_locs import (
+        assign_req_to_token_pool_func as assign_req_to_token_pool_func,
+    )
+    from sglang.srt.speculative.triton_ops.cache_locs import (
+        create_extend_after_decode_spec_info as create_extend_after_decode_spec_info,
+    )
+    from sglang.srt.speculative.triton_ops.cache_locs import (
+        filter_finished_cache_loc_kernel as filter_finished_cache_loc_kernel,
+    )
+    from sglang.srt.speculative.triton_ops.cache_locs import (
+        generate_draft_decode_kv_indices as generate_draft_decode_kv_indices,
+    )
+    from sglang.srt.speculative.triton_ops.cache_locs import (
+        get_src_tgt_cache_loc as get_src_tgt_cache_loc,
+    )
+    from sglang.srt.speculative.triton_ops.cache_locs import (
+        get_target_cache_loc as get_target_cache_loc,
+    )
+else:
+    align_evict_mask_to_page_size = None
+    assign_draft_cache_locs = None
+    assign_req_to_token_pool = None
+    create_extend_after_decode_spec_info = None
+    filter_finished_cache_loc_kernel = None
+    generate_draft_decode_kv_indices = None
+    get_src_tgt_cache_loc = None
+    get_target_cache_loc = None
 
 _is_cuda = is_cuda()
 _is_hip = is_hip()
 _is_npu = is_npu()
 _is_musa = is_musa()
+_is_cpu = is_cpu()
 
 if TYPE_CHECKING:
     from sglang.srt.constrained.base_grammar_backend import BaseGrammarObject
@@ -57,6 +70,10 @@ if _is_cuda:
     from sgl_kernel import fast_topk
 elif _is_hip:
     from sgl_kernel import fast_topk
+elif _is_cpu:
+    from sgl_kernel import assign_req_to_token_pool_cpu
+
+    from sglang.srt.utils.common import fast_topk
 else:
     from sglang.srt.utils.common import fast_topk
 
@@ -156,6 +173,36 @@ def spec_need_hidden_states(server_args: Optional[ServerArgs] = None) -> bool:
     if server_args.speculative_algorithm == "STANDALONE":
         return False
     return not server_args.enable_multi_layer_eagle
+
+
+def assign_req_to_token_pool_func(
+    req_pool_indices: torch.Tensor,
+    req_to_token: torch.Tensor,
+    start_offset: torch.Tensor,
+    end_offset: torch.Tensor,
+    out_cache_loc: torch.Tensor,
+    batch_size: int,
+):
+    if _is_cpu:
+        assign_req_to_token_pool_cpu(
+            req_pool_indices.to(torch.int32),
+            req_to_token,
+            start_offset.to(torch.int32),
+            end_offset.to(torch.int32),
+            out_cache_loc,
+            req_to_token.shape[1],
+            next_power_of_2(batch_size),
+        )
+    else:
+        assign_req_to_token_pool[(batch_size,)](
+            req_pool_indices,
+            req_to_token,
+            start_offset,
+            end_offset,
+            out_cache_loc,
+            req_to_token.shape[1],
+            next_power_of_2(batch_size),
+        )
 
 
 @torch.compile(dynamic=True, disable=_is_npu)
@@ -298,7 +345,7 @@ def generate_simulated_accept_index(
 
     accept_indx_first_col = accept_index[:, 0].view(-1, 1)
     sim_accept_index = torch.full(
-        (bs, spec_steps + 1), -1, dtype=torch.int32, device="cuda"
+        (bs, spec_steps + 1), -1, dtype=torch.int32, device=accept_index.device
     )
     sim_accept_index[:, :simulate_acc_len] = accept_indx_first_col + torch.arange(
         simulate_acc_len, device=accept_index.device

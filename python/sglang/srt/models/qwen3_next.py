@@ -182,25 +182,8 @@ class Qwen3GatedDeltaNet(nn.Module):
 
         set_weight_attrs(self.A_log, {"weight_loader": sharded_weight_loader(0)})
         set_weight_attrs(self.dt_bias, {"weight_loader": sharded_weight_loader(0)})
-        # self.norm = (
-        #     RMSNormGated(
-        #         self.head_v_dim,
-        #         eps=self.layer_norm_epsilon,
-        #         group_size=None,
-        #         norm_before_gate=True,
-        #         device=torch.get_device_module().current_device(),
-        #         dtype=config.torch_dtype,
-        #     )
-        #     if not get_global_server_args().disable_piecewise_cuda_graph
-        #     else FusedRMSNormGated(
-        #         self.head_v_dim,
-        #         eps=self.layer_norm_epsilon,
-        #         activation=self.activation,
-        #         device=torch.get_device_module().current_device(),
-        #         dtype=config.torch_dtype,
-        #     )
-        # )
-        self.norm = RMSNormGated(
+        self.norm = (
+            RMSNormGated(
                 self.head_v_dim,
                 eps=self.layer_norm_epsilon,
                 group_size=None,

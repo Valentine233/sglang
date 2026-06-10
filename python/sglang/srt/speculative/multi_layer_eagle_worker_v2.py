@@ -39,14 +39,14 @@ from sglang.srt.server_args import ServerArgs
 from sglang.srt.speculative.base_spec_worker import BaseDraftWorker, BaseSpecWorker
 from sglang.srt.speculative.draft_utils import DraftBackendFactory
 from sglang.srt.speculative.eagle_info import EagleDraftInput, EagleVerifyInput
-from sglang.srt.speculative.eagle_info_v2 import fill_bonus_tokens
+from sglang.srt.speculative.eagle_info_v2 import fill_new_verified_id_func
 from sglang.srt.speculative.eagle_utils import TreeMaskMode, build_tree_kernel_efficient
 from sglang.srt.speculative.multi_layer_eagle_draft_extend_cuda_graph_runner import (
     MultiLayerEagleMultiStepDraftExtendCudaGraphRunner,
 )
 from sglang.srt.speculative.multi_layer_eagle_utils import (
-    assign_hidden_states_pool_triton,
-    rotate_input_ids_triton,
+    assign_hidden_states_pool,
+    rotate_input_ids,
 )
 from sglang.srt.speculative.spec_info import SpeculativeAlgorithm
 from sglang.srt.speculative.spec_utils import (
@@ -55,7 +55,7 @@ from sglang.srt.speculative.spec_utils import (
     record_stream_for_v2_verify,
     select_top_k_tokens,
 )
-from sglang.srt.utils import is_npu
+from sglang.srt.utils import is_cpu, is_npu
 from sglang.srt.utils.async_probe import (
     maybe_detect_inf,
     maybe_detect_nan,
@@ -64,6 +64,7 @@ from sglang.srt.utils.async_probe import (
 from sglang.srt.utils.common import empty_context, fast_topk
 
 _is_npu = is_npu()
+_is_cpu = is_cpu()
 
 if TYPE_CHECKING:
     from sglang.srt.model_executor.model_runner import ModelRunner, ModelRunnerOutput
@@ -230,7 +231,7 @@ class MultiLayerEagleDraftWorker(BaseDraftWorker):
         self.cuda_graph_runner = None
         self.cuda_graph_runner_for_draft_extend = None
 
-        if self.server_args.disable_cuda_graph:
+        if _is_cpu or self.server_args.disable_cuda_graph:
             return
 
         if not _is_npu:
@@ -350,7 +351,7 @@ class MultiLayerEagleDraftWorker(BaseDraftWorker):
                             (tree_info[2].size(0), 1),
                             i,
                             dtype=torch.long,
-                            device="cuda",
+                            device="cpu" if _is_cpu else "cuda",
                         )
                     )
 
@@ -438,7 +439,7 @@ class MultiLayerEagleDraftWorker(BaseDraftWorker):
         # Construct input_ids
         # TODO: same chunked-prefill chain divergence as PR #26329.
         if not batch.forward_mode.is_idle():
-            rotate_input_ids_triton(
+            rotate_input_ids(
                 forward_batch.input_ids,
                 forward_batch.extend_start_loc,
                 forward_batch.extend_seq_lens,
@@ -473,7 +474,7 @@ class MultiLayerEagleDraftWorker(BaseDraftWorker):
                     output.logits_output.hidden_states
                 )
             if forward_batch.extend_seq_lens is not None:
-                rotate_input_ids_triton(
+                rotate_input_ids(
                     forward_batch.input_ids,
                     forward_batch.extend_start_loc,
                     forward_batch.extend_seq_lens,
@@ -484,7 +485,7 @@ class MultiLayerEagleDraftWorker(BaseDraftWorker):
 
         # Update req_to_hidden_states_pool for KV Cache reversion
         if forward_batch.extend_seq_lens is not None:
-            assign_hidden_states_pool_triton(
+            assign_hidden_states_pool(
                 target_hidden_states,
                 forward_batch.req_pool_indices,
                 self.req_to_hidden_states_pool,
@@ -581,7 +582,7 @@ class MultiLayerEagleDraftWorker(BaseDraftWorker):
                         draft_logits_output.logits_output.hidden_states
                     )
                 if forward_batch.extend_seq_lens is not None:
-                    rotate_input_ids_triton(
+                    rotate_input_ids(
                         forward_batch.input_ids,
                         forward_batch.extend_start_loc,
                         forward_batch.extend_seq_lens,
@@ -607,7 +608,7 @@ class MultiLayerEagleDraftWorker(BaseDraftWorker):
                 req_pool_indices = forward_batch.req_pool_indices
                 extend_seq_lens = forward_batch.extend_seq_lens
                 extend_start_loc = forward_batch.extend_start_loc
-            assign_hidden_states_pool_triton(
+            assign_hidden_states_pool(
                 hidden_states,
                 req_pool_indices,
                 self.req_to_hidden_states_pool,
@@ -764,7 +765,11 @@ class MultiLayerEagleWorkerV2(BaseSpecWorker):
         self,
         batch: ScheduleBatch,
     ):
-        fwd_stream = torch.get_device_module(self.device).current_stream()
+        fwd_stream = (
+            torch.get_device_module(self.device).current_stream()
+            if not _is_cpu
+            else None
+        )
         verify_input: EagleVerifyInput = batch.spec_info
         record_stream_for_v2_verify(batch, verify_input, fwd_stream)
 
@@ -824,15 +829,22 @@ class MultiLayerEagleWorkerV2(BaseSpecWorker):
         ) = verify_input.sample(batch, logits_output)
         new_seq_lens = batch.seq_lens + accept_lens
 
+        if _is_cpu:
+            verify_done = None
+        else:
+            verify_done = torch.get_device_module(self.device).Event()
+            verify_done.record()
+
         if not batch.forward_mode.is_idle():
             accept_tokens = predict[accept_index]
             bonus_tokens = torch.empty_like(accept_lens, dtype=torch.int32)
             # stride = accept_tokens per-req width = accept_index.shape[1].
-            fill_bonus_tokens[(bs,)](
+            fill_new_verified_id_func(
                 accept_tokens,
                 accept_lens,
                 bonus_tokens,
                 accept_index.shape[1],
+                bs,
             )
         else:
             bonus_tokens = torch.empty((0,), device=self.device, dtype=torch.int32)

@@ -329,7 +329,6 @@ class MambaPool:
                     ),
                     dtype=ssm_dtype,
                     device=device,
-                    # device="cuda",
                 )
                 # Cache intermediate conv windows (last K-1 inputs) per draft token during target verify
                 # Shape: [num_layers, size + 1, speculative_num_draft_tokens, dim, K-1]
@@ -344,7 +343,6 @@ class MambaPool:
                         ),
                         dtype=conv_dtype,
                         device=device,
-                        # device="cuda",
                     )
                     for conv_shape in conv_state_shape
                 ]
@@ -946,7 +944,7 @@ class MHATokenToKVPool(KVCache):
             else None
         )
 
-        if enable_kv_cache_copy:
+        if enable_kv_cache_copy and not _is_cpu:
             self._init_kv_copy_and_warmup()
         else:
             self._kv_copy_config = None
@@ -1275,7 +1273,7 @@ class MHATokenToKVPool(KVCache):
         maybe_detect_oob(tgt_loc, 0, size_limit, "move_kv_cache tgt_loc")
         maybe_detect_oob(src_loc, 0, size_limit, "move_kv_cache src_loc")
 
-        if envs.SGLANG_NATIVE_MOVE_KV_CACHE.get():
+        if envs.SGLANG_NATIVE_MOVE_KV_CACHE.get() or _is_cpu:
             move_kv_cache_native(self.k_buffer, self.v_buffer, tgt_loc, src_loc)
             return
 

@@ -52,9 +52,9 @@ from sglang.srt.speculative.eagle_draft_extend_cuda_graph_runner import (
 )
 from sglang.srt.speculative.eagle_info import EagleDraftInput, EagleVerifyInput
 from sglang.srt.speculative.eagle_info_v2 import (
-    assign_extend_cache_locs,
-    fill_accept_out_cache_loc,
-    fill_bonus_tokens,
+    assign_extend_cache_locs_func,
+    fill_accept_out_cache_loc_func,
+    fill_new_verified_id_func,
 )
 from sglang.srt.speculative.eagle_utils import (
     TreeMaskMode,
@@ -83,6 +83,7 @@ from sglang.srt.utils.common import (
     empty_context,
     fast_topk,
     get_available_gpu_memory,
+    is_cpu,
     is_cuda,
     is_hip,
     is_musa,
@@ -92,6 +93,7 @@ from sglang.srt.utils.common import (
 )
 from sglang.srt.utils.patch_torch import monkey_patch_torch_reductions
 
+_is_cpu = is_cpu()
 _is_npu = is_npu()
 _is_cuda = is_cuda()
 _is_musa = is_musa()
@@ -323,7 +325,7 @@ class EagleDraftWorker(BaseDraftWorker):
         self.cuda_graph_runner = None
         self.cuda_graph_runner_for_draft_extend = None
 
-        if self.server_args.disable_cuda_graph:
+        if _is_cpu or self.server_args.disable_cuda_graph:
             return
 
         if self.server_args.model_impl == "mindspore":
@@ -1282,16 +1284,23 @@ class EAGLEWorkerV2(BaseSpecWorker):
         ):
             self._mamba_verify_update(batch, accept_lens, accept_index, bs)
 
+        if _is_cpu:
+            verify_done = None
+        else:
+            verify_done = torch.get_device_module(self.device).Event()
+            verify_done.record()
+
         if not batch.forward_mode.is_idle():
             accept_tokens = predict[accept_index]
             bonus_tokens = torch.empty_like(accept_lens, dtype=torch.int32)
             # stride = accept_tokens per-req width = accept_index.shape[1]
             # (spec_steps + 1); NOT num_draft_tokens, wrong for topk > 1 trees.
-            fill_bonus_tokens[(bs,)](
+            fill_new_verified_id_func(
                 accept_tokens,
                 accept_lens,
                 bonus_tokens,
                 accept_index.shape[1],
+                bs,
             )
         else:
             bonus_tokens = torch.empty((0,), device=self.device, dtype=torch.int32)
@@ -1436,26 +1445,36 @@ class EAGLEWorkerV2(BaseSpecWorker):
             "eagle v2 move_accepted_tokens accept_index",
         )
 
-        tgt_cache_loc = torch.zeros(
-            size,
-            dtype=torch.int64,
-            device=self.device,
-        )
+        tgt_cache_loc = torch.zeros(size, dtype=torch.int64, device=self.device)
+        if _is_cpu:
+            from sgl_kernel import assign_extend_cache_locs_cpu
+
+            assign_extend_cache_locs_cpu(
+                batch.req_pool_indices,
+                self.req_to_token_pool.req_to_token,
+                batch.seq_lens,
+                batch.seq_lens + num_correct_drafts + 1,
+                tgt_cache_loc,
+                self.req_to_token_pool.req_to_token.shape[1],
+            )
+        else:
+            from sglang.srt.speculative.eagle_info_v2 import assign_extend_cache_locs
+
+            assign_extend_cache_locs[(bs,)](
+                batch.req_pool_indices,
+                self.req_to_token_pool.req_to_token,
+                batch.seq_lens,
+                batch.seq_lens + num_correct_drafts + 1,
+                tgt_cache_loc,
+                self.req_to_token_pool.req_to_token.shape[1],
+                next_power_of_2(bs),
+            )
         accept_out_cache_loc = torch.zeros(size, dtype=torch.int64, device=self.device)
-        assign_extend_cache_locs[(bs,)](
-            batch.req_pool_indices,
-            self.req_to_token_pool.req_to_token,
-            batch.seq_lens,
-            batch.seq_lens + num_correct_drafts + 1,
-            tgt_cache_loc,
-            self.req_to_token_pool.req_to_token.shape[1],
-            next_power_of_2(bs),
-        )
-        fill_accept_out_cache_loc[(size,)](
+        fill_accept_out_cache_loc_func(
             accept_index,
             batch.out_cache_loc,
             accept_out_cache_loc,
-            next_power_of_2(size),
+            size,
         )
         self.token_to_kv_pool_allocator.get_kvcache().move_kv_cache(
             tgt_cache_loc, accept_out_cache_loc
