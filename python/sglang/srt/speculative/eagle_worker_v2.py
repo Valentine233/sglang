@@ -54,6 +54,7 @@ from sglang.srt.speculative.eagle_info import EagleDraftInput, EagleVerifyInput
 from sglang.srt.speculative.eagle_info_v2 import (
     fill_accept_out_cache_loc_func,
     fill_bonus_tokens_func,
+    fill_extend_cache_locs_func,
 )
 from sglang.srt.speculative.eagle_utils import (
     TreeMaskMode,
@@ -88,7 +89,6 @@ from sglang.srt.utils.common import (
     is_musa,
     is_npu,
     log_info_on_rank0,
-    next_power_of_2,
 )
 from sglang.srt.utils.patch_torch import monkey_patch_torch_reductions
 
@@ -1438,31 +1438,20 @@ class EAGLEWorkerV2(BaseSpecWorker):
             "eagle v2 move_accepted_tokens accept_index",
         )
 
-        tgt_cache_loc = torch.zeros(size, dtype=torch.int64, device=self.device)
-        if _is_cpu:
-            from sgl_kernel import assign_extend_cache_locs_cpu
-
-            assign_extend_cache_locs_cpu(
-                batch.req_pool_indices,
-                self.req_to_token_pool.req_to_token,
-                batch.seq_lens,
-                batch.seq_lens + num_correct_drafts + 1,
-                tgt_cache_loc,
-                self.req_to_token_pool.req_to_token.shape[1],
-            )
-        else:
-            from sglang.srt.speculative.eagle_info_v2 import assign_extend_cache_locs
-
-            assign_extend_cache_locs[(bs,)](
-                batch.req_pool_indices,
-                self.req_to_token_pool.req_to_token,
-                batch.seq_lens,
-                batch.seq_lens + num_correct_drafts + 1,
-                tgt_cache_loc,
-                self.req_to_token_pool.req_to_token.shape[1],
-                next_power_of_2(bs),
-            )
+        tgt_cache_loc = torch.zeros(
+            size,
+            dtype=torch.int64,
+            device=self.device,
+        )
         accept_out_cache_loc = torch.zeros(size, dtype=torch.int64, device=self.device)
+        fill_extend_cache_locs_func(
+            batch.req_pool_indices,
+            self.req_to_token_pool.req_to_token,
+            batch.seq_lens,
+            batch.seq_lens + num_correct_drafts + 1,
+            tgt_cache_loc,
+            bs,
+        )
         fill_accept_out_cache_loc_func(
             accept_index,
             batch.out_cache_loc,

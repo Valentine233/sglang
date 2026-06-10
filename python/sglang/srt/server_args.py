@@ -2672,6 +2672,16 @@ class ServerArgs:
         self.uses_mamba_radix_cache = True
 
         if (
+            is_cpu()
+            and self.speculative_eagle_topk is not None
+            and self.speculative_eagle_topk > 1
+        ):
+            # The CPU causal-conv kernel is not tree-aware.
+            raise ValueError(
+                "speculative_eagle_topk > 1 is not supported for hybrid GDN models on CPU"
+            )
+
+        if (
             is_sm100_supported()
             and self.attention_backend is None
             and sm100_default_attention_backend is not None
@@ -2750,7 +2760,16 @@ class ServerArgs:
                             "Automatically disabling radix cache."
                         )
                         self.disable_radix_cache = True
-                    elif not is_cpu():
+                    elif is_cpu():
+                        # On CPU, extra_buffer is unsupported.
+                        # Automatically disable radix cache instead.
+                        logger.warning(
+                            f"Speculative decoding for {model_arch} is not compatible "
+                            "with radix cache when using --mamba-scheduler-strategy "
+                            "no_buffer on CPU. Automatically disabling radix cache."
+                        )
+                        self.disable_radix_cache = True
+                    else:
                         raise ValueError(
                             f"Speculative decoding for {model_arch} is not compatible with radix cache when using --mamba-scheduler-strategy no_buffer."
                             "To use radix cache with speculative decoding, please use --mamba-scheduler-strategy extra_buffer and set SGLANG_ENABLE_SPEC_V2=1."
