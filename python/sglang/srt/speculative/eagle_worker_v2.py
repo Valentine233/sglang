@@ -219,7 +219,11 @@ class EagleDraftWorker(BaseDraftWorker):
         if (c := self.draft_runner.canary_manager) is not None:
             c.mark_init_finished()
 
-        self.tree_mask_mode = TreeMaskMode.FULL_MASK
+        # The CPU verify attention kernel (intel_amx) consumes the qlen x qlen
+        # QLEN_ONLY tree mask directly; FULL_MASK is for the GPU kernels.
+        self.tree_mask_mode = (
+            TreeMaskMode.QLEN_ONLY if _is_cpu else TreeMaskMode.FULL_MASK
+        )
 
         self.plan_stream, self.plan_stream_ctx = _get_plan_stream(self.device)
 
@@ -317,7 +321,10 @@ class EagleDraftWorker(BaseDraftWorker):
         )
 
         self.draft_runner.draft_attn_backend = self.draft_attn_backend
-        self.tree_mask_mode = TreeMaskMode.FULL_MASK
+        # Keep in sync with __init__: QLEN_ONLY on CPU, FULL_MASK on GPU.
+        self.tree_mask_mode = (
+            TreeMaskMode.QLEN_ONLY if _is_cpu else TreeMaskMode.FULL_MASK
+        )
 
     def init_cuda_graphs(self):
         """Capture cuda graphs."""

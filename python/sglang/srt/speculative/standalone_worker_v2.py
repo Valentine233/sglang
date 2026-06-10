@@ -15,10 +15,12 @@ from sglang.srt.speculative.eagle_utils import TreeMaskMode
 from sglang.srt.speculative.eagle_worker_v2 import EagleDraftWorker, EAGLEWorkerV2
 from sglang.srt.speculative.spec_info import SpeculativeAlgorithm
 from sglang.srt.speculative.spec_utils import draft_tp_context
-from sglang.srt.utils import empty_context, get_bool_env_var, is_cuda
+from sglang.srt.utils import empty_context, get_bool_env_var, is_cpu, is_cuda
 
 if is_cuda():
     from sgl_kernel import segment_packbits  # noqa: F401
+
+_is_cpu = is_cpu()
 
 logger = logging.getLogger(__name__)
 SGLANG_RETURN_ORIGINAL_LOGPROB = get_bool_env_var("SGLANG_RETURN_ORIGINAL_LOGPROB")
@@ -127,7 +129,9 @@ class StandaloneDraftWorker(EagleDraftWorker):
         ):
             self.init_attention_backend()
             self.init_cuda_graphs()
-        self.tree_mask_mode = TreeMaskMode.FULL_MASK
+        self.tree_mask_mode = (
+            TreeMaskMode.QLEN_ONLY if _is_cpu else TreeMaskMode.FULL_MASK
+        )
 
         self.plan_stream, self.plan_stream_ctx = _get_plan_stream(self.device)
 
