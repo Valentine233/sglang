@@ -21,7 +21,7 @@ if TYPE_CHECKING:
     from sglang.srt.layers.radix_attention import RadixAttention
     from sglang.srt.model_executor.model_runner import ModelRunner
 
-from sgl_kernel import flash_mla_decode, flash_mla_get_workspace_size, merge_state_v2
+from sgl_kernel import merge_state_v2
 from sgl_kernel.flash_attn import flash_attn_varlen_func, flash_attn_with_kvcache
 
 
@@ -396,22 +396,6 @@ class XPUAttentionBackend(AttentionBackend):
                     )
                 )
 
-        if self.use_mla:
-            workspace_size = flash_mla_get_workspace_size(
-                max_seq_len=self.max_context_len,
-                num_batches=batch_size,
-                num_heads=self.num_local_heads,
-                page_size=self.page_size,
-                num_kv_splits=-1,
-            )
-            if (
-                not hasattr(self, "workspace")
-                or self.workspace.numel() < workspace_size
-            ):
-                self.workspace = torch.empty(
-                    workspace_size, device=self.device, dtype=torch.uint8
-                )
-
         # Convert the page table to a strided format which is needed by FA3 API
         if self.page_size > 1:
             self.strided_indices = torch.arange(
@@ -680,36 +664,30 @@ class XPUAttentionBackend(AttentionBackend):
                     return output, lse
                 return output
             else:
-                # Do absorbed multi-latent attention
+                # Do absorbed multi-latent attention (vLLM-aligned): pack the query
+                # as [q_nope, q_pe], attend against the full latent+rope KV cache,
+                # and take the value as the leading kv_lora_rank slice of that cache.
                 kv_cache = self.token_to_kv_pool.get_key_buffer(layer.layer_id).to(
                     q.dtype
                 )
-                k_rope = kv_cache[:, :, layer.v_head_dim :]
-                c_kv = kv_cache[:, :, : layer.v_head_dim]
-                k_rope_cache = k_rope.view(
-                    -1,
-                    self.page_size,
-                    layer.tp_k_head_num,
-                    layer.head_dim - layer.v_head_dim,
-                )
-                c_kv_cache = c_kv.view(
-                    -1, self.page_size, layer.tp_v_head_num, layer.v_head_dim
+                kv_cache = kv_cache.view(
+                    -1, self.page_size, layer.tp_k_head_num, layer.head_dim
                 )
                 if q_rope is not None:
                     q_nope = q.view(-1, layer.tp_q_head_num, layer.v_head_dim)
                     q_rope = q_rope.view(
                         -1, layer.tp_q_head_num, layer.head_dim - layer.v_head_dim
                     )
+                    q_packed = torch.cat([q_nope, q_rope], dim=-1)
                 else:
-                    q_all = q.contiguous().view(-1, layer.tp_q_head_num, layer.head_dim)
-                    q_nope = q_all[:, :, : layer.v_head_dim]
-                    q_rope = q_all[:, :, layer.v_head_dim :]
+                    q_packed = q.contiguous().view(
+                        -1, layer.tp_q_head_num, layer.head_dim
+                    )
 
                 result = flash_attn_with_kvcache(
-                    q=q_rope,
-                    k_cache=k_rope_cache,
-                    v_cache=c_kv_cache,
-                    qv=q_nope,
+                    q=q_packed,
+                    k_cache=kv_cache,
+                    v_cache=kv_cache[..., : layer.v_head_dim],
                     page_table=page_table,
                     cache_seqlens=cache_seqlens,
                     cu_seqlens_q=cu_seqlens_q,
@@ -726,10 +704,9 @@ class XPUAttentionBackend(AttentionBackend):
                     o, softmax_lse, *rest = result
                     o_expand, softmax_lse_expand, *rest_expand = (
                         flash_attn_with_kvcache(
-                            q=q_rope,
-                            k_cache=k_rope_cache,
-                            v_cache=c_kv_cache,
-                            qv=q_nope,
+                            q=q_packed,
+                            k_cache=kv_cache,
+                            v_cache=kv_cache[..., : layer.v_head_dim],
                             page_table=self.forward_metadata_spec_decode_expand.page_table,
                             cache_seqlens=self.forward_metadata_spec_decode_expand.cache_seqlens_int32,
                             cu_seqlens_q=self.forward_metadata_spec_decode_expand.cu_seqlens_q,
@@ -970,7 +947,10 @@ class XPUAttentionBackend(AttentionBackend):
                 else:
                     o = result
         else:
-            # Do absorbed multi-latent attention
+            # Do absorbed multi-latent attention (vLLM-aligned): pack the query as
+            # [q_nope, q_pe] (head_dim = kv_lora_rank + qk_rope_head_dim), run paged
+            # attention against the full latent+rope KV cache, and read the value as
+            # the leading kv_lora_rank slice of that same cache.
             kv_cache = self.token_to_kv_pool.get_key_buffer(layer.layer_id).to(q.dtype)
             assert not use_cascade_attn, "Cascade attention is not supported with MLA"
 
@@ -979,19 +959,26 @@ class XPUAttentionBackend(AttentionBackend):
                 q_rope = q_rope.view(
                     -1, layer.tp_q_head_num, layer.head_dim - layer.v_head_dim
                 )
+                q_packed = torch.cat([q_nope, q_rope], dim=-1)
             else:
-                q_all = q.contiguous().view(-1, layer.tp_q_head_num, layer.head_dim)
-                q_nope = q_all[:, :, : layer.v_head_dim]
-                q_rope = q_all[:, :, layer.v_head_dim :]
+                q_packed = q.contiguous().view(-1, layer.tp_q_head_num, layer.head_dim)
 
-            o = flash_mla_decode(
-                q_nope,
-                q_rope,
-                kv_cache.view(-1, self.page_size, layer.head_dim),
-                metadata.cache_seqlens_int32,
-                metadata.page_table,
-                self.workspace,
-                layer.scaling,
+            kv_cache = kv_cache.view(
+                -1, self.page_size, layer.tp_k_head_num, layer.head_dim
+            )
+
+            o = flash_attn_with_kvcache(
+                q=q_packed,
+                k_cache=kv_cache,
+                v_cache=kv_cache[..., : layer.v_head_dim],
+                page_table=metadata.page_table,
+                cache_seqlens=metadata.cache_seqlens_int32,
+                cu_seqlens_q=metadata.cu_seqlens_q,
+                cu_seqlens_k_new=None,
+                max_seqlen_q=metadata.max_seq_len_q,
+                softmax_scale=layer.scaling,
+                causal=False,
+                softcap=layer.logit_cap,
             )
 
         out = o.view(-1, layer.tp_q_head_num * layer.v_head_dim)
