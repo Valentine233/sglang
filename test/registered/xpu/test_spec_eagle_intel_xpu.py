@@ -42,7 +42,7 @@ class TestEagleLlama2IntelXPU(
 
     attention_backend = "intel_xpu"
     page_size = 128
-    spec_topk = 1
+    spec_topk = 2
     spec_tokens = 6
     gsm8k_check_accept_len = True
     gsm8k_num_examples = 1000
