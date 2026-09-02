@@ -135,6 +135,19 @@ class TestCPUFP8KVCacheMethod(CustomTestCase):
             buffers["v_buffer"][0][loc].float(),
             (cache_v / 0.25).to(torch.float8_e4m3fn).float(),
         )
+        untouched = torch.tensor([0, 2])
+        self.assertTrue(
+            torch.equal(
+                buffers["k_buffer"][0][untouched].view(torch.uint8),
+                torch.zeros_like(buffers["k_buffer"][0][untouched].view(torch.uint8)),
+            )
+        )
+        self.assertTrue(
+            torch.equal(
+                buffers["v_buffer"][0][untouched].view(torch.uint8),
+                torch.zeros_like(buffers["v_buffer"][0][untouched].view(torch.uint8)),
+            )
+        )
         self.assertIsNone(buffers["k_scale_buffer"])
         self.assertIsNone(buffers["v_scale_buffer"])
         self.assertEqual(method.compute_cell_size(2, 8, 1, 4), 128)

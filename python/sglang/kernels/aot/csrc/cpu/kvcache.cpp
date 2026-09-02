@@ -1,3 +1,5 @@
+#include <cstring>
+
 #include "common.h"
 #include "vec.h"
 
@@ -18,6 +20,12 @@ inline void copy_stub(scalar_t* __restrict__ dst, const scalar_t* __restrict__ s
   for (; d < size; ++d) {
     dst[d] = src[d];
   }
+}
+
+template <>
+inline void
+copy_stub<at::Float8_e4m3fn>(at::Float8_e4m3fn* __restrict__ dst, const at::Float8_e4m3fn* __restrict__ src, int size) {
+  std::memcpy(dst, src, size * sizeof(at::Float8_e4m3fn));
 }
 
 template <typename scalar_t, typename index_t>
@@ -90,9 +98,17 @@ void store_cache_cpu(
   int64_t head_size = k.size(2);
   int64_t num_pages = k_cache.size(0);
   int64_t row_dim_value = num_heads * head_size;
+  int64_t v_row_dim = v.size(1) * v.size(2);
+  int64_t kc_row_dim = k_cache.size(1) * k_cache.size(2);
+  int64_t vc_row_dim = v_cache.size(1) * v_cache.size(2);
   if (row_dim.has_value()) {
     CHECK_EQ(row_dim.value(), row_dim_value);
   }
+  CHECK_EQ(v.size(0), batch_size);
+  CHECK_EQ(v_cache.size(0), num_pages);
+  CHECK_EQ(v_row_dim, row_dim_value);
+  CHECK_EQ(kc_row_dim, row_dim_value);
+  CHECK_EQ(vc_row_dim, row_dim_value);
   CHECK_EQ(indices.size(0), batch_size);
 
   // strides: batch dimension (dim 0) stride in elements
@@ -108,15 +124,15 @@ void store_cache_cpu(
   const auto index_dtype = indices.scalar_type();
   TORCH_CHECK(index_dtype == at::kLong || index_dtype == at::kInt, "indices must be int64 or int32");
 
-  // dtype : [bfloat16, float16, uint8] for fp8 KV stored as uint8
+  // dtype : [bfloat16, float16, int8, float8_e4m3fn, uint8]
   // index_dtype : [int64, int32]
-  AT_DISPATCH_REDUCED_FLOATING_TYPES_AND(at::ScalarType::Byte, dtype, "store_cache_cpu", [&] {
+  CPU_DISPATCH_PACKED_TYPES(dtype, "store_cache_cpu", [&] {
     AT_DISPATCH_INDEX_TYPES(index_dtype, "store_cache_cpu_index", [&] {
-      store_cache_kernel_impl<scalar_t, index_t>(
-          k.data_ptr<scalar_t>(),
-          v.data_ptr<scalar_t>(),
-          k_cache.data_ptr<scalar_t>(),
-          v_cache.data_ptr<scalar_t>(),
+      store_cache_kernel_impl<packed_t, index_t>(
+          k.data_ptr<packed_t>(),
+          v.data_ptr<packed_t>(),
+          k_cache.data_ptr<packed_t>(),
+          v_cache.data_ptr<packed_t>(),
           indices.data_ptr<index_t>(),
           batch_size,
           num_pages,

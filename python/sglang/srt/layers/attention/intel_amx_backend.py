@@ -308,21 +308,14 @@ class IntelAMXAttnBackend(AttentionBackend):
             if not layer.is_cross_attention
             else forward_batch.encoder_out_cache_loc
         )
-        if (
-            save_kv_cache
-            and k is not None
-            and v is not None
-            and key_buffer.dtype == torch.float8_e4m3fn
-        ):
-            swa_loc = None if layer.is_cross_attention else self.swa_out_cache_loc
-            self.token_to_kv_pool.set_kv_buffer(
-                layer,
-                KVWriteLoc(cache_loc, swa_loc),
-                k,
-                v,
-                k_scale=layer.k_scale_float,
-                v_scale=layer.v_scale_float,
-            )
+        decode_cache_loc = cache_loc
+        if self.use_sliding_window_kv_pool and not layer.is_cross_attention:
+            _, is_swa_layer = self.token_to_kv_pool.layers_mapping[layer.layer_id]
+            if is_swa_layer:
+                assert self.swa_out_cache_loc is not None
+                decode_cache_loc = self.swa_out_cache_loc
+
+        if not save_kv_cache:
             k = None
             v = None
         self.decode_attention_fwd(
@@ -334,7 +327,7 @@ class IntelAMXAttnBackend(AttentionBackend):
             o.view(-1, layer.tp_q_head_num, layer.v_head_dim),
             k,
             v,
-            cache_loc,
+            decode_cache_loc,
             attn_logits,
             req_to_token,
             req_pool_indices,

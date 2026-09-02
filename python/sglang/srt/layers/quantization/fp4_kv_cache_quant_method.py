@@ -364,10 +364,21 @@ class CPUFP8KVCacheMethod(KVCacheQuantMethodBase):
         k_scale=None,
         v_scale=None,
     ) -> None:
+        import sgl_kernel  # noqa: F401
+
         k_scale = 1.0 if k_scale is None else k_scale
         v_scale = 1.0 if v_scale is None else v_scale
-        k_buffer[loc] = (cache_k / k_scale).to(torch.float8_e4m3fn)
-        v_buffer[loc] = (cache_v / v_scale).to(torch.float8_e4m3fn)
+        quantized_k = (cache_k / k_scale).to(torch.float8_e4m3fn)
+        quantized_v = (cache_v / v_scale).to(torch.float8_e4m3fn)
+        row_dim = quantized_k.size(1) * quantized_k.size(2)
+        torch.ops.sgl_kernel.store_cache_cpu(
+            quantized_k,
+            quantized_v,
+            k_buffer,
+            v_buffer,
+            loc,
+            row_dim,
+        )
 
     def dequantize_prev_kv(
         self, k_fp8, k_scales, v_fp8, v_scales, layer_id

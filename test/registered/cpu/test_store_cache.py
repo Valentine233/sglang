@@ -18,9 +18,8 @@ torch.manual_seed(42)
 DEVICE = "cpu"
 CACHE_SIZE = 4096
 
-# for fp8 KV stored as uint8, e.g. float8_e4m3fn and float8_e5m2
-DTYPES = [torch.float16, torch.bfloat16, torch.uint8]
-DTYPE_IDS = ["float16", "bfloat16", "uint8"]
+DTYPES = [torch.float16, torch.bfloat16, torch.uint8, torch.float8_e4m3fn]
+DTYPE_IDS = ["float16", "bfloat16", "uint8", "float8_e4m3fn"]
 
 
 def _store_cache_cpu(k, v, k_cache, v_cache, indices):
@@ -29,9 +28,11 @@ def _store_cache_cpu(k, v, k_cache, v_cache, indices):
 
 
 def _random_tensor(shape, dtype):
-    """FP8 KV is stored as uint8; randn is not implemented for Byte."""
+    """Create values for dtypes without native CPU randn support."""
     if dtype == torch.uint8:
         return torch.randint(0, 256, shape, dtype=torch.uint8, device=DEVICE)
+    if dtype == torch.float8_e4m3fn:
+        return torch.randn(shape, dtype=torch.bfloat16, device=DEVICE).to(dtype)
     return torch.randn(shape, dtype=dtype, device=DEVICE)
 
 
@@ -85,6 +86,17 @@ def test_store_cache_int32_indices(batch_size, num_heads, head_dim, dtype):
     assert torch.equal(v_cache, v_cache_ref)
 
 
+def test_store_cache_rejects_asymmetric_kv_rows():
+    k = torch.randn((2, 2, 64), dtype=torch.bfloat16, device=DEVICE)
+    v = torch.randn((2, 2, 32), dtype=torch.bfloat16, device=DEVICE)
+    k_cache = torch.empty((8, 2, 64), dtype=torch.bfloat16, device=DEVICE)
+    v_cache = torch.empty((8, 2, 32), dtype=torch.bfloat16, device=DEVICE)
+    indices = torch.tensor([1, 3], dtype=torch.int64, device=DEVICE)
+
+    with pytest.raises(RuntimeError, match="CHECK_EQ"):
+        _store_cache_cpu(k, v, k_cache, v_cache, indices)
+
+
 @pytest.mark.parametrize(
     ("k_scale", "v_scale"),
     [(None, None), (0.5, 0.25)],
@@ -92,6 +104,7 @@ def test_store_cache_int32_indices(batch_size, num_heads, head_dim, dtype):
 )
 def test_mha_fp8_e4m3_pool_decode_numerics(k_scale, v_scale):
     seq_len = 16
+    prefix_len = seq_len - 1
     num_heads = 2
     head_dim = 64
     num_kv_splits = 8
@@ -109,20 +122,29 @@ def test_mha_fp8_e4m3_pool_decode_numerics(k_scale, v_scale):
     )
     layer = SimpleNamespace(layer_id=0)
     loc = torch.arange(seq_len, dtype=torch.int64, device=DEVICE)
-    cache_k = torch.randn(
-        (seq_len, num_heads, head_dim), dtype=torch.bfloat16, device=DEVICE
+    prefix_k = torch.randn(
+        (prefix_len, num_heads, head_dim), dtype=torch.bfloat16, device=DEVICE
     )
-    cache_v = torch.randn(
-        (seq_len, num_heads, head_dim), dtype=torch.bfloat16, device=DEVICE
+    prefix_v = torch.randn(
+        (prefix_len, num_heads, head_dim), dtype=torch.bfloat16, device=DEVICE
     )
-    pool.set_kv_buffer(layer, loc, cache_k, cache_v, k_scale=k_scale, v_scale=v_scale)
+    decode_k = torch.randn(
+        (1, num_heads, head_dim), dtype=torch.bfloat16, device=DEVICE
+    )
+    decode_v = torch.randn(
+        (1, num_heads, head_dim), dtype=torch.bfloat16, device=DEVICE
+    )
+    pool.set_kv_buffer(
+        layer,
+        loc[:prefix_len],
+        prefix_k,
+        prefix_v,
+        k_scale=k_scale,
+        v_scale=v_scale,
+    )
 
     effective_k_scale = 1.0 if k_scale is None else k_scale
     effective_v_scale = 1.0 if v_scale is None else v_scale
-    k_dequant = (pool.get_key_buffer(0).float() * effective_k_scale).to(torch.bfloat16)
-    v_dequant = (pool.get_value_buffer(0).float() * effective_v_scale).to(
-        torch.bfloat16
-    )
     query = torch.randn((1, num_heads, head_dim), dtype=torch.bfloat16, device=DEVICE)
     output = torch.empty_like(query)
     req_to_token = loc.to(torch.int32).unsqueeze(0)
@@ -141,9 +163,9 @@ def test_mha_fp8_e4m3_pool_decode_numerics(k_scale, v_scale):
         effective_k_scale,
         effective_v_scale,
         output,
-        None,
-        None,
-        None,
+        decode_k,
+        decode_v,
+        loc[prefix_len:],
         attn_logits,
         req_to_token,
         req_pool_indices,
@@ -154,6 +176,23 @@ def test_mha_fp8_e4m3_pool_decode_numerics(k_scale, v_scale):
         0,
         None,
         None,
+    )
+
+    expected_decode_k = (decode_k / effective_k_scale).to(torch.float8_e4m3fn)
+    expected_decode_v = (decode_v / effective_v_scale).to(torch.float8_e4m3fn)
+    decode_loc = loc[prefix_len:]
+    assert torch.equal(
+        pool.get_key_buffer(0)[decode_loc].view(torch.uint8),
+        expected_decode_k.view(torch.uint8),
+    )
+    assert torch.equal(
+        pool.get_value_buffer(0)[decode_loc].view(torch.uint8),
+        expected_decode_v.view(torch.uint8),
+    )
+
+    k_dequant = (pool.get_key_buffer(0).float() * effective_k_scale).to(torch.bfloat16)
+    v_dequant = (pool.get_value_buffer(0).float() * effective_v_scale).to(
+        torch.bfloat16
     )
 
     output_ref = (
